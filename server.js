@@ -19,23 +19,42 @@ const client = axios.create({
     }
 });
 
-// 🔍 1. මූවී එක සර්ච් කරලා පළවෙනි පෝස්ට් එකේ URL එක ගන්නා කොටස
+// 🔍 1. මූවී එක සර්ච් කරලා පළවෙනි පෝස්ට් එකේ URL එක ගන්නා නවීකරණය කළ කොටස
 async function searchMovie(query) {
     try {
         const searchPath = `/?s=${encodeURIComponent(query)}`;
         const { data } = await client.get(searchPath);
         const $ = cheerio.load(data);
         
-        // Sinhalasub සර්ච් රිසල්ට් වල පළවෙනිම item එක තෝරාගනී
-        const firstResult = $('div.result-item article').first();
-        if (!firstResult.length) return null;
+        let moviePageUrl = null;
+        let title = null;
 
-        const title = firstResult.find('div.title a').text().trim();
-        const moviePageUrl = firstResult.find('div.title a').attr('href');
+        // ක්‍රමය 1: සාමාන්‍ය සර්ච් බොක්ස් රිසල්ට් (div.result-item) චෙක් කිරීම
+        const firstResult = $('div.result-item article').first();
+        if (firstResult.length) {
+            title = firstResult.find('div.title a').text().trim();
+            moviePageUrl = firstResult.find('div.title a').attr('href');
+        } 
+        
+        // ක්‍රමය 2: (Fallback) සයිට් එකේ ලේඅවුට් එක වෙනස් වුණොත් සෘජුවම <a> tags සෙවීම
+        if (!moviePageUrl) {
+            $('a').each((i, el) => {
+                const href = $(el).attr('href');
+                const text = $(el).text().toLowerCase();
+                
+                if (href && (href.includes('/?p=') || (href.includes('sinhalasub.lk/') && !href.includes('/category/') && !href.includes('/tag/') && text.includes(query.toLowerCase())))) {
+                    moviePageUrl = href;
+                    title = $(el).text().trim() || query;
+                    return false; // ලින්ක් එක හමු වූ නිසා loop එක නවත්වයි
+                }
+            });
+        }
+
+        if (!moviePageUrl) return null;
 
         return { title, moviePageUrl };
     } catch (error) {
-        console.error("🔍 Search Error:", error.message);
+        console.error("🔍 Search Error Details:", error.message);
         return null;
     }
 }
@@ -54,7 +73,6 @@ async function scrapePixeldrain(pageUrl) {
             
             if (href && href.includes('pixeldrain.com/u/')) {
                 // ⚡ Pixeldrain View ලින්ක් එක කෙලින්ම Direct Download API ලින්ක් එකක් බවට හරවයි
-                // උදා: https://pixeldrain.com/u/xxxx -> https://pixeldrain.com/api/file/xxxx
                 directDownloadLink = href.replace('/u/', '/api/file/');
                 return false; // ලින්ක් එක හමු වූ නිසා loop එක නවත්වයි
             }
