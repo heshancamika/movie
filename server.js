@@ -1,91 +1,106 @@
 const express = require('express');
-const axios = require('axios');
-const cheerio = require('cheerio');
-const config = require('./config');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+// Stealth Plugin එක enable කිරීම (Bot Detection එක නැති කරනවා)
+puppeteer.use(StealthPlugin());
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-// 🛠️ සයිට් එකට රික්වෙස්ට් යවන ක්ලයන්ට් එක සෙට් කිරීම
-const client = axios.create({
-    baseURL: config.SITE_URL,
-    timeout: 15000,
-    headers: {
-        'User-Agent': config.USER_AGENT,
-        'Cookie': config.COOKIE,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+// Browser Instance එකක් හදන එක (මේකෙන් Speed එක වැඩි වෙනවා)
+let browserInstance;
+
+async function getBrowser() {
+    if (!browserInstance || !browserInstance.isConnected()) {
+        browserInstance = await puppeteer.launch({
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled'
+            ]
+        });
     }
-});
+    return browserInstance;
+}
 
-// 🔍 1. මූවී එක සර්ච් කරලා පළවෙනි පෝස්ට් එකේ URL එක ගන්නා නවීකරණය කළ කොටස
+// 🔍 1. සයිට් එක Search කරලා මූවී එකේ URL එක ගන්න එක
 async function searchMovie(query) {
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+    
     try {
-        const searchPath = `/?s=${encodeURIComponent(query)}`;
-        const { data } = await client.get(searchPath);
-        const $ = cheerio.load(data);
+        // Browser එකේ User-Agent එක සරලම එකක් ලෙස සෙට් කිරීම
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
-        let moviePageUrl = null;
-        let title = null;
+        const searchUrl = `https://sinhalasub.lk/?s=${encodeURIComponent(query)}`;
+        console.log(`🔍 Searching: ${searchUrl}`);
+        
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-        // ක්‍රමය 1: සාමාන්‍ය සර්ච් බොක්ස් රිසල්ට් (div.result-item) චෙක් කිරීම
-        const firstResult = $('div.result-item article').first();
-        if (firstResult.length) {
-            title = firstResult.find('div.title a').text().trim();
-            moviePageUrl = firstResult.find('div.title a').attr('href');
-        } 
-        
-        // ක්‍රමය 2: (Fallback) සයිට් එකේ ලේඅවුට් එක වෙනස් වුණොත් සෘජුවම <a> tags සෙවීම
-        if (!moviePageUrl) {
-            $('a').each((i, el) => {
-                const href = $(el).attr('href');
-                const text = $(el).text().toLowerCase();
-                
-                if (href && (href.includes('/?p=') || (href.includes('sinhalasub.lk/') && !href.includes('/category/') && !href.includes('/tag/') && text.includes(query.toLowerCase())))) {
-                    moviePageUrl = href;
-                    title = $(el).text().trim() || query;
-                    return false; // ලින්ක් එක හමු වූ නිසා loop එක නවත්වයි
-                }
-            });
-        }
+        // සර්ච් රිසල්ට් වල පළවෙනි මූවී එකේ Link එක ගන්නවා
+        const moviePageUrl = await page.evaluate(() => {
+            const firstArticle = document.querySelector('article a');
+            return firstArticle ? firstArticle.href : null;
+        });
 
         if (!moviePageUrl) return null;
 
-        return { title, moviePageUrl };
-    } catch (error) {
-        console.error("🔍 Search Error Details:", error.message);
-        return null;
-    }
-}
-
-// 📥 2. මූවී පේජ් එක ඇතුළෙන් Pixeldrain Direct Link එක ඇදලා ගන්නා කොටස
-async function scrapePixeldrain(pageUrl) {
-    try {
-        const { data } = await client.get(pageUrl);
-        const $ = cheerio.load(data);
-        
-        let directDownloadLink = null;
-
-        // පේජ් එකේ තියෙන ඔක්කොම <a> tags (ලින්ක්ස්) චෙක් කරනවා
-        $('a').each((i, el) => {
-            const href = $(el).attr('href');
-            
-            if (href && href.includes('pixeldrain.com/u/')) {
-                // ⚡ Pixeldrain View ලින්ක් එක කෙලින්ම Direct Download API ලින්ක් එකක් බවට හරවයි
-                directDownloadLink = href.replace('/u/', '/api/file/');
-                return false; // ලින්ක් එක හමු වූ නිසා loop එක නවත්වයි
-            }
+        // මූවී එකේ Title එකත් ගමු
+        const title = await page.evaluate(() => {
+            const firstTitle = document.querySelector('article .title a, article h2 a, article h3 a');
+            return firstTitle ? firstTitle.innerText.trim() : 'Unknown Movie';
         });
 
-        return directDownloadLink;
+        return { title, moviePageUrl };
     } catch (error) {
-        console.error("📥 Scraping Link Error:", error.message);
+        console.error("Search Error:", error.message);
         return null;
+    } finally {
+        await page.close(); // Page එක වැසීම (Memory Save කරනවා)
     }
 }
 
-// 🌐 3. API Endpoint (මෙතනින් තමයි බොට් එක ඩේටා ගන්නේ)
+// 📥 2. මූවී පේජ් එකට ගිහින් Pixeldrain Link එක ගන්න එක
+async function scrapePixeldrain(pageUrl) {
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+
+    try {
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        
+        console.log(`📥 Visiting Movie Page: ${pageUrl}`);
+        await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+        // පේජ් එකේ ඇතුළෙ තියෙන හැම Link එකක්ම චෙක් කරනවා
+        const downloadLink = await page.evaluate(() => {
+            const links = Array.from(document.querySelectorAll('a'));
+            
+            // Pixeldrain ලින්ක් එකක් තියෙනවද බලන්නවා
+            const pdLink = links.find(a => a.href && a.href.includes('pixeldrain.com'));
+            
+            if (pdLink) {
+                // ලින්ක් එක /u/ වගේම ආවොත් ඒක Direct Download එකක් බවට හරවනවා
+                let href = pdLink.href;
+                if (href.includes('/u/')) {
+                    return href.replace('/u/', '/api/file/') + '?download';
+                }
+                return href; // ඒක වෙනත් ෆෝමැට් එකක ආවොත් ඒ විදිහටම
+            }
+            return null;
+        });
+
+        return downloadLink;
+    } catch (error) {
+        console.error("Scraping Error:", error.message);
+        return null;
+    } finally {
+        await page.close();
+    }
+}
+
+// 🌐 3. API Endpoint එක
 app.get('/api/movie', async (req, res) => {
     const movieName = req.query.name;
     
@@ -93,24 +108,21 @@ app.get('/api/movie', async (req, res) => {
         return res.status(400).json({ status: false, error: "කරුණාකර මූවී එකේ නම ඇතුළත් කරන්න. (?name=movie_name)" });
     }
 
-    console.log(`🎬 Searching request received for: ${movieName}`);
+    console.log(`🎬 Request received for: ${movieName}`);
     
-    // පියවර 1: සර්ච් කිරීම
     const movieInfo = await searchMovie(movieName);
     if (!movieInfo) {
-        return res.json({ status: false, message: "කණගාටුයි, එම චිත්‍රපටය Sinhalasub සයිට් එකෙන් හමු වූයේ නැත." });
+        return res.json({ status: false, message: "කණගාටුයි, එම චිත්‍රපටය හමු වූයේ නැත." });
     }
 
-    // පියවර 2: Pixeldrain ලින්ක් එක සීරීම
     const downloadLink = await scrapePixeldrain(movieInfo.moviePageUrl);
     if (!downloadLink) {
         return res.json({ 
             status: false, 
-            message: `"${movieInfo.title}" චිත්‍රපටය හමු විය, නමුත් එහි Pixeldrain Download ලින්ක් එකක් හමු වූයේ නැත.` 
+            message: `"${movieInfo.title}" චිත්‍රපටය හමු විය, නමුත් Pixeldrain ලින්ක් එකක් හමු වූයේ නැත. (සයිට් එකේ Shortlink හෝ වෙනත් ආරක්ෂාවක් තියෙන්න පුළුවන්)` 
         });
     }
 
-    // පියවර 3: සාර්ථක ප්‍රතිඵලය JSON එකක් ලෙස බොට් එකට දීම
     res.json({
         status: true,
         title: movieInfo.title,
@@ -118,7 +130,7 @@ app.get('/api/movie', async (req, res) => {
     });
 });
 
-// සර්වර් එක පණ ගැන්වීම
-app.listen(config.PORT, () => {
-    console.log(`🚀 Sinhalasub Movie Scraper API is running on port ${config.PORT}`);
+// Server Start කිරීම
+app.listen(PORT, () => {
+    console.log(`🚀 Sinhalasub Scraper API running on http://localhost:${PORT}`);
 });
