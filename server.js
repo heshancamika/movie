@@ -8,7 +8,6 @@ puppeteer.use(StealthPlugin());
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Browser Instance එකක් හදන එක (මේකෙන් Speed එක වැඩි වෙනවා)
 let browserInstance;
 
 async function getBrowser() {
@@ -31,7 +30,6 @@ async function searchMovie(query) {
     const page = await browser.newPage();
     
     try {
-        // Browser එකේ User-Agent එක සරලම එකක් ලෙස සෙට් කිරීම
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         const searchUrl = `https://sinhalasub.lk/?s=${encodeURIComponent(query)}`;
@@ -39,18 +37,28 @@ async function searchMovie(query) {
         
         await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-        // සර්ච් රිසල්ට් වල පළවෙනි මූවී එකේ Link එක ගන්නවා
+        // සාමාන්‍යයෙන් මේ සයිට් වල මූවී ලින්ක්ස් වලට 'post-item' හෝ 'post-title' වගේ classes තියෙනවා
         const moviePageUrl = await page.evaluate(() => {
-            const firstArticle = document.querySelector('article a');
-            return firstArticle ? firstArticle.href : null;
+            const links = Array.from(document.querySelectorAll('a'));
+            const movieLink = links.find(a => {
+                const href = a.href || '';
+                // Category, Tag, Page වගේ ඒවා බැහැර කරලා සාමාන්‍ය මූවී ලින්ක් එක ගන්නවා
+                return href.includes('sinhalasub.lk/') && 
+                       !href.includes('/category/') && 
+                       !href.includes('/tag/') && 
+                       !href.includes('/page/') && 
+                       !href.includes('/?s=') &&
+                       href !== 'https://sinhalasub.lk/' &&
+                       href !== 'https://sinhalasub.lk';
+            });
+            return movieLink ? movieLink.href : null;
         });
 
         if (!moviePageUrl) return null;
 
-        // මූවී එකේ Title එකත් ගමු
         const title = await page.evaluate(() => {
-            const firstTitle = document.querySelector('article .title a, article h2 a, article h3 a');
-            return firstTitle ? firstTitle.innerText.trim() : 'Unknown Movie';
+            const h2 = document.querySelector('h2 a, h3 a, .post-title a');
+            return h2 ? h2.innerText.trim() : 'Unknown Movie';
         });
 
         return { title, moviePageUrl };
@@ -58,12 +66,12 @@ async function searchMovie(query) {
         console.error("Search Error:", error.message);
         return null;
     } finally {
-        await page.close(); // Page එක වැසීම (Memory Save කරනවා)
+        await page.close();
     }
 }
 
-// 📥 2. මූවී පේජ් එකට ගිහින් Pixeldrain Link එක ගන්න එක
-async function scrapePixeldrain(pageUrl) {
+// 📥 2. මූවී පේජ් එකට ගිහින් Direct CDN Links ගන්න එක
+async function scrapeDownloadLinks(pageUrl) {
     const browser = await getBrowser();
     const page = await browser.newPage();
 
@@ -74,24 +82,51 @@ async function scrapePixeldrain(pageUrl) {
         await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
         // පේජ් එකේ ඇතුළෙ තියෙන හැම Link එකක්ම චෙක් කරනවා
-        const downloadLink = await page.evaluate(() => {
+        const downloadLinks = await page.evaluate(() => {
             const links = Array.from(document.querySelectorAll('a'));
+            const results = [];
             
-            // Pixeldrain ලින්ක් එකක් තියෙනවද බලන්නවා
-            const pdLink = links.find(a => a.href && a.href.includes('pixeldrain.com'));
-            
-            if (pdLink) {
-                // ලින්ක් එක /u/ වගේම ආවොත් ඒක Direct Download එකක් බවට හරවනවා
-                let href = pdLink.href;
-                if (href.includes('/u/')) {
-                    return href.replace('/u/', '/api/file/') + '?download';
+            links.forEach(a => {
+                const href = a.href || '';
+                const text = a.innerText || '';
+                
+                // අපිට ඕනේ cdn.sinhalasub.net වලින් පටන් ගන්නා Direct Download ලින්ක්ස්
+                if (href.includes('cdn.sinhalasub.net') || href.includes('.mp4')) {
+                    let quality = 'Unknown';
+                    
+                    // Link එකේ Text එකෙන් Quality එක හොයාගන්නවා (උදා: 1080p, 720p)
+                    if (text.includes('1080') || text.toLowerCase().includes('fhd')) quality = 'FHD 1080p';
+                    else if (text.includes('720') || text.toLowerCase().includes('hd')) quality = 'HD 720p';
+                    else if (text.includes('480') || text.toLowerCase().includes('sd')) quality = 'SD 480p';
+                    
+                    // URL එකෙන්ම Quality එක හොයාගන්නවා (Text එකේ නැතිනම්)
+                    if (quality === 'Unknown') {
+                        if (href.includes('1080')) quality = 'FHD 1080p';
+                        else if (href.includes('720')) quality = 'HD 720p';
+                        else if (href.includes('480')) quality = 'SD 480p';
+                    }
+
+                    results.push({
+                        quality: quality,
+                        download_url: href
+                    });
                 }
-                return href; // ඒක වෙනත් ෆෝමැට් එකක ආවොත් ඒ විදිහටම
-            }
-            return null;
+            });
+
+            // Duplicate ලින්ක්ස් ඉවත් කිරීම
+            const uniqueResults = [];
+            const seenUrls = new Set();
+            results.forEach(item => {
+                if (!seenUrls.has(item.download_url)) {
+                    seenUrls.add(item.download_url);
+                    uniqueResults.push(item);
+                }
+            });
+
+            return uniqueResults;
         });
 
-        return downloadLink;
+        return downloadLinks;
     } catch (error) {
         console.error("Scraping Error:", error.message);
         return null;
@@ -115,18 +150,20 @@ app.get('/api/movie', async (req, res) => {
         return res.json({ status: false, message: "කණගාටුයි, එම චිත්‍රපටය හමු වූයේ නැත." });
     }
 
-    const downloadLink = await scrapePixeldrain(movieInfo.moviePageUrl);
-    if (!downloadLink) {
+    const downloadLinks = await scrapeDownloadLinks(movieInfo.moviePageUrl);
+    if (!downloadLinks || downloadLinks.length === 0) {
         return res.json({ 
             status: false, 
-            message: `"${movieInfo.title}" චිත්‍රපටය හමු විය, නමුත් Pixeldrain ලින්ක් එකක් හමු වූයේ නැත. (සයිට් එකේ Shortlink හෝ වෙනත් ආරක්ෂාවක් තියෙන්න පුළුවන්)` 
+            message: `"${movieInfo.title}" චිත්‍රපටය හමු විය, නමුත් Direct Download ලින්ක්ස් හමු වූයේ නැත.` 
         });
     }
 
+    // ඔයා දුන්නු API එකේ වගේම හරියටම JSON Response එකක් දෙනවා
     res.json({
         status: true,
+        owner: "@heshan",
         title: movieInfo.title,
-        downloadLink: downloadLink
+        result: downloadLinks
     });
 });
 
