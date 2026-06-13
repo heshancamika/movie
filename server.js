@@ -28,37 +28,48 @@ async function scrapeAllLinks(pageUrl) {
         let results = [];
         
         // පේජ් එකේ ප්‍රධාන Title එක (මූවී එකේ නම) ගන්නවා
-        const pageTitle = $('h1.entry-title').text().trim() || $('title').text().trim();
+        const pageTitle = $('h1.entry-title').text().trim() || $('h1').first().text().trim() || "Unknown Movie";
 
-        // පේජ් එකේ තියෙන ඔක්කොම ලින්ක්ස් ලූප් කරනවා
+        // 🔍 සයිට් එකේ තියෙන හැම <a> tag එකක්ම පීරලා බලනවා
         $('a').each((i, el) => {
-            const href = $(el).attr('href');
+            const href = $(el).attr('href') || '';
+            const linkText = $(el).text().trim().toLowerCase();
+            const parentText = $(el).parent().text().trim().toLowerCase();
             
-            // Pixeldrain ලින්ක්ස් විතරක් ෆිල්ටර් කරගන්නවා
-            if (href && href.includes('pixeldrain.com/u/')) {
-                const linkText = $(el).text().trim();
+            // ලින්ක් එකේ හෝ එයට සම්බන්ධ තැන්වල pixeldrain හරි download හරි තියෙනවද බලනවා
+            if (href.includes('pixeldrain.com') || href.includes('sinhalasub.lk/download/')) {
                 let quality = "Unknown";
                 let size = "Unknown";
 
-                // Quality එක වෙන් කරගැනීම
-                if (linkText.includes('1080p')) quality = 'FHD 1080p';
-                else if (linkText.includes('720p')) quality = 'HD 720p';
-                else if (linkText.includes('480p')) quality = 'SD 480p';
+                // Quality එක හොයාගැනීම (ලින්ක් එකේ text එකෙන් හෝ parent div එකෙන්)
+                const fullCheckText = `${linkText} ${parentText} ${href}`;
+                
+                if (fullCheckText.includes('1080p')) quality = 'FHD 1080p';
+                else if (fullCheckText.includes('720p')) quality = 'HD 720p';
+                else if (fullCheckText.includes('480p')) quality = 'SD 480p';
 
-                // වරහන් ඇතුළේ තියෙන ෆයිල් සයිස් එක වෙන් කරගැනීම (RegEx මඟින්)
-                const sizeMatch = linkText.match(/\(([^)]+)\)/);
-                if (sizeMatch && sizeMatch[1]) {
+                // ෆයිල් සයිස් එක වෙන් කරගැනීම (GB හෝ MB තියෙන රටාවන්)
+                const sizeMatch = $(el).text().trim().match(/(\d+(\.\d+)?\s*(GB|MB))/i) || $(el).parent().text().trim().match(/(\d+(\.\d+)?\s*(GB|MB))/i);
+                if (sizeMatch) {
                     size = sizeMatch[1];
                 }
 
-                // Pixeldrain View Link එක Direct Download API එකක් බවට හැරවීම
-                const directUrl = href.replace('/u/', '/api/file/');
+                // Pixeldrain ලින්ක් එකක් නම් කෙලින්ම Direct Link එකක් බවට හැරවීම
+                let directUrl = href;
+                if (href.includes('pixeldrain.com/u/')) {
+                    directUrl = href.replace('/u/', '/api/file/');
+                }
 
-                results.push({
-                    quality: quality,
-                    size: size,
-                    download_url: directUrl
-                });
+                // ඩියුප්ලිකේට් (එකම ලින්ක් එක දෙපාරක්) වැටෙන එක නවත්වන්න
+                const isExist = results.some(item => item.download_url === directUrl);
+
+                if (!isExist && href !== '') {
+                    results.push({
+                        quality: quality,
+                        size: size,
+                        download_url: directUrl
+                    });
+                }
             }
         });
 
@@ -69,21 +80,19 @@ async function scrapeAllLinks(pageUrl) {
     }
 }
 
-// 🌐 New API Endpoint (ඔයා ඉල්ලපු විදිහටම /api/movie වෙනුවට ලස්සනට හැදුවා)
+// 🌐 API Endpoint
 app.get('/sinhala-sub-download', async (req, res) => {
-    const targetUrl = req.query.url; // 👈 ?url= එකෙන් එන ලින්ක් එක ගන්නවා
+    const targetUrl = req.query.url;
     
-    // යූසර් ලින්ක් එක දීලා නැත්නම් හෝ වැරදි ලින්ක් එකක් නම්
     if (!targetUrl || !targetUrl.includes('sinhalasub.lk/')) {
         return res.status(400).json({ 
             status: false, 
-            error: "කරුණාකර නිවැරදි Sinhalasub මූවී ලින්ක් එකක් ඇතුළත් කරන්න. Example: /sinhala-sub-download?url=https://sinhalasub.lk/movies/..." 
+            error: "කරුණාකර නිවැරදි Sinhalasub මූවී ලින්ක් එකක් ඇතුළත් කරන්න." 
         });
     }
 
     console.log(`🔗 Scraping Request Received for URL: ${targetUrl}`);
     
-    // ලින්ක් එක ඇතුළෙන් ඩේටා ටික ස්ක්‍රේප් කිරීම
     const scrapeData = await scrapeAllLinks(targetUrl);
     
     if (!scrapeData || scrapeData.results.length === 0) {
@@ -93,7 +102,7 @@ app.get('/sinhala-sub-download', async (req, res) => {
         });
     }
 
-    // 🚀 ඔයා ඉල්ලපු Format එකටම JSON Response එක දීම
+    // 🚀 JSON Response
     res.json({
         status: true,
         owner: "@KingPoddaModz",
